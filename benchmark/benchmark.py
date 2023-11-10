@@ -30,6 +30,13 @@ import albumentations as A
 from albumentations.augmentations.geometric.functional import rotate, resize, shift_scale_rotate
 from albumentations.augmentations.crops.functional import random_crop
 
+from pixelpipes.utilities import pipeline as pixelpipes_pipeline
+from pixelpipes import graph as pixelpipes_graph
+from pixelpipes import image as pixelpipes_image
+from pixelpipes.image import geometry as pixelpipes_geometry
+from pixelpipes.image import augmentation as pixelpipes_augmentation
+from pixelpipes.image import processing as pixelpipes_processing
+
 cv2.setNumThreads(0)  # noqa E402
 cv2.ocl.setUseOpenCL(False)  # noqa E402
 
@@ -40,7 +47,7 @@ os.environ["VECLIB_MAXIMUM_THREADS"] = "1"  # noqa E402
 os.environ["NUMEXPR_NUM_THREADS"] = "1"  # noqa E402
 
 
-DEFAULT_BENCHMARKING_LIBRARIES = ["albumentations", "imgaug", "torchvision", "keras", "augmentor", "solt"]
+DEFAULT_BENCHMARKING_LIBRARIES = ["albumentations", "imgaug", "torchvision", "keras", "augmentor", "solt", "pixelpipes"]
 
 
 def parse_args():
@@ -79,6 +86,7 @@ def get_package_versions():
         "pillow-simd",
         "augmentor",
         "solt",
+        "pixelpipes"
     ]
     package_versions = {"Python": sys.version}
     for package in packages:
@@ -128,7 +136,7 @@ class MarkdownGenerator:
         return value_matrix
 
     def _make_versions_text(self):
-        libraries = ["Python", "numpy", "pillow-simd", "opencv-python", "scikit-image", "scipy"]
+        libraries = ["Python", "numpy", "pillow-simd", "opencv-python", "scikit-image", "scipy", "pixelpipes"]
         libraries_with_versions = [
             "{library} {version}".format(library=library, version=self._package_versions[library].replace("\n", ""))
             for library in libraries
@@ -154,6 +162,8 @@ def read_img_cv2(filepath):
     img = cv2.imread(filepath)
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     return img
+
+# TODO possibly read with pixelpipes
 
 
 def format_results(images_per_second_for_aug, show_std=False):
@@ -183,6 +193,9 @@ class BenchmarkTest(ABC):
         img = self.torchvision_transform(img)
         return np.array(img, np.uint8, copy=False)
 
+    def pixelpipes(self, img):
+        return self.pixelpipes_pipeline(img)
+
     def is_supported_by(self, library):
         if library == "imgaug":
             return hasattr(self, "imgaug_transform")
@@ -192,6 +205,8 @@ class BenchmarkTest(ABC):
             return hasattr(self, "solt_stream")
         if library == "torchvision":
             return hasattr(self, "torchvision_transform")
+        if library == "pixelpipes":
+            return hasattr(self, "pixelpipes_pipeline")
 
         return hasattr(self, library)
 
@@ -206,6 +221,11 @@ class HorizontalFlip(BenchmarkTest):
         self.imgaug_transform = iaa.Fliplr(p=1)
         self.augmentor_op = Operations.Flip(probability=1, top_bottom_left_right="LEFT_RIGHT")
         self.solt_stream = slc.Stream([slt.Flip(p=1, axis=1)])
+        @pixelpipes_pipeline()
+        def pipeline(img):
+            image = pixelpipes_graph.Constant(img)
+            return pixelpipes_geometry.Flip(image, horizontal=True, vertical=False)
+        self.pixelpipes_pipeline = pipeline
 
     def albumentations(self, img):
         if img.ndim == 3 and img.shape[2] > 1 and img.dtype == np.uint8:
@@ -228,6 +248,11 @@ class VerticalFlip(BenchmarkTest):
         self.imgaug_transform = iaa.Flipud(p=1)
         self.augmentor_op = Operations.Flip(probability=1, top_bottom_left_right="TOP_BOTTOM")
         self.solt_stream = slc.Stream([slt.Flip(p=1, axis=0)])
+        @pixelpipes_pipeline()
+        def pipeline(img):
+            image = pixelpipes_graph.Constant(img)
+            return pixelpipes_geometry.Flip(image, horizontal=False, vertical=True)
+        self.pixelpipes_pipeline = pipeline
 
     def albumentations(self, img):
         return albumentations.vflip(img)
@@ -247,6 +272,12 @@ class Rotate(BenchmarkTest):
         self.imgaug_transform = iaa.Affine(rotate=(45, 45), order=1, mode="reflect")
         self.augmentor_op = Operations.RotateStandard(probability=1, max_left_rotation=45, max_right_rotation=45)
         self.solt_stream = slc.Stream([slt.Rotate(p=1, angle_range=(45, 45))], padding="r")
+        # TODO 45 degrees is not supported by pixelpipes
+        # @pixelpipes_pipeline()
+        # def pipeline(img):
+        #     image = pixelpipes_graph.Constant(img)
+        #     return pixelpipes_geometry.Rotate90(image, 1)
+        # self.pixelpipes_pipeline = pipeline
 
     def albumentations(self, img):
         return rotate(img, angle=-45)
@@ -264,6 +295,11 @@ class Brightness(BenchmarkTest):
         self.imgaug_transform = iaa.Add((127, 127), per_channel=False)
         self.augmentor_op = Operations.RandomBrightness(probability=1, min_factor=1.5, max_factor=1.5)
         self.solt_stream = slc.Stream([slt.Brightness(p=1, brightness_range=(127, 127))])
+        @pixelpipes_pipeline()
+        def pipeline(img):
+            image = pixelpipes_graph.Constant(img)
+            return pixelpipes_augmentation.ImageBrightness(image, 1.5)
+        self.pixelpipes_pipeline = pipeline
 
     def albumentations(self, img):
         return albumentations.brightness_contrast_adjust(img, beta=0.5, beta_by_max=True)
@@ -351,6 +387,13 @@ class ShiftHSV(BenchmarkTest):
 class Solarize(BenchmarkTest):
     def __init__(self):
         pass
+        # TODO need solarize based on grayscale
+        # @pixelpipes_pipeline()
+        # def pipeline(img):
+        #     image = pixelpipes_graph.Constant(img)
+        #     # TODO have to convert 128 to 0.5?
+        #     return pixelpipes_processing.ImageSolarize(image, 0.5)
+        # self.pixelpipes_pipeline = pipeline
 
     def albumentations(self, img):
         return albumentations.solarize(img)
@@ -380,6 +423,11 @@ class RandomCrop64(BenchmarkTest):
         self.imgaug_transform = iaa.CropToFixedSize(width=64, height=64)
         self.augmentor_op = Operations.Crop(probability=1, width=64, height=64, centre=False)
         self.solt_stream = slc.Stream([slt.Crop(crop_to=(64, 64), crop_mode="r")])
+        @pixelpipes_pipeline()
+        def pipeline(img):
+            image = pixelpipes_graph.Constant(img)
+            return pixelpipes_geometry.RandomPatchView(image, 64, 64, 0)
+        self.pixelpipes_pipeline = pipeline
 
     def albumentations(self, img):
         img = random_crop(img, crop_height=64, crop_width=64, h_start=0, w_start=0)
@@ -404,6 +452,13 @@ class RandomSizedCrop_64_512(BenchmarkTest):
             [iaa.CropToFixedSize(width=64, height=64), iaa.Scale(size=512, interpolation="linear")]
         )
         self.solt_stream = slc.Stream([slt.Crop(crop_to=(64, 64), crop_mode="r"), slt.Resize(resize_to=(512, 512))])
+
+        @pixelpipes_pipeline()
+        def pipeline(img):
+            image = pixelpipes_graph.Constant(img)
+            patch = pixelpipes_geometry.RandomPatchView(image, 64, 64, 0)
+            return pixelpipes_geometry.Resize(patch, 512, 512)
+        self.pixelpipes_pipeline = pipeline
 
     def albumentations(self, img):
         img = random_crop(img, crop_height=64, crop_width=64, h_start=0, w_start=0)
@@ -452,6 +507,12 @@ class Resize512(BenchmarkTest):
         self.solt_stream = slc.Stream([slt.Resize(resize_to=(512, 512))])
         self.augmentor_op = Operations.Resize(probability=1, width=512, height=512, resample_filter="BILINEAR")
 
+        @pixelpipes_pipeline()
+        def pipeline(img):
+            image = pixelpipes_graph.Constant(img)
+            return pixelpipes_geometry.Resize(image, 512, 512)
+        self.pixelpipes_pipeline = pipeline
+
     def albumentations(self, img):
         return resize(img, height=512, width=512)
 
@@ -475,6 +536,11 @@ class Grayscale(BenchmarkTest):
         self.augmentor_op = Operations.Greyscale(probability=1)
         self.imgaug_transform = iaa.Grayscale(alpha=1.0)
         self.solt_stream = slc.Stream([slt.CvtColor(mode="rgb2gs")])
+        @pixelpipes_pipeline()
+        def pipeline(img):
+            image = pixelpipes_graph.Constant(img)
+            return pixelpipes_image.Grayscale(image)
+        self.pixelpipes_pipeline = pipeline
 
     def albumentations(self, img):
         return albumentations.to_gray(img)
