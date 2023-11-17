@@ -59,6 +59,9 @@ def parse_args():
         "-i", "--images", default=2000, type=int, metavar="N", help="number of images for benchmarking (default: 2000)"
     )
     parser.add_argument(
+        "-b", "--batch", default=0, type=int, metavar="N", help="number of images per batch, set 0 for maximum"
+    )
+    parser.add_argument(
         "-l", "--libraries", default=DEFAULT_BENCHMARKING_LIBRARIES, nargs="+", help="list of libraries to benchmark"
     )
     parser.add_argument(
@@ -179,6 +182,9 @@ class BenchmarkTest(ABC):
     def __str__(self):
         return self.__class__.__name__
 
+    def batched(self, library):
+        return False
+
     def imgaug(self, img):
         return self.imgaug_transform.augment_image(img)
 
@@ -194,7 +200,7 @@ class BenchmarkTest(ABC):
         return np.array(img, np.uint8, copy=False)
 
     def pixelpipes(self, img):
-        return self.pixelpipes_pipeline(img)
+        return next(self.pixelpipes_pipeline(img))
 
     def is_supported_by(self, library):
         if library == "imgaug":
@@ -212,8 +218,12 @@ class BenchmarkTest(ABC):
 
     def run(self, library, imgs):
         transform = getattr(self, library)
-        for img in imgs:
-            transform(img)
+        if self.batched(library):
+            image_list = list(img for img in imgs)
+            transform(image_list)
+        else:
+            for img in imgs:
+                transform(img)
 
 
 class HorizontalFlip(BenchmarkTest):
@@ -222,10 +232,19 @@ class HorizontalFlip(BenchmarkTest):
         self.augmentor_op = Operations.Flip(probability=1, top_bottom_left_right="LEFT_RIGHT")
         self.solt_stream = slc.Stream([slt.Flip(p=1, axis=1)])
         @pixelpipes_pipeline()
-        def pipeline(img):
-            image = pixelpipes_graph.Constant(img)
-            return pixelpipes_geometry.Flip(image, horizontal=True, vertical=False)
+        def pipeline(imgs):
+            images = pixelpipes_graph.Constant(imgs)
+            return pixelpipes_geometry.Flip(source=images, horizontal=True, vertical=False)
         self.pixelpipes_pipeline = pipeline
+
+    def batched(self, library):
+        return library in ("pixelpipes",)
+
+    def pixelpipes(self, img):
+        limit = len(img)
+        for i, res in enumerate(self.pixelpipes_pipeline(img)):
+            if i == limit:
+                break
 
     def albumentations(self, img):
         if img.ndim == 3 and img.shape[2] > 1 and img.dtype == np.uint8:
@@ -617,33 +636,36 @@ def main():
     paths = list(sorted(os.listdir(data_dir)))
     paths = paths[: args.images]
     imgs_cv2 = [read_img_cv2(os.path.join(data_dir, path)) for path in paths]
+    imgs_pixelpipes = np.concatenate(imgs_cv2, axis=0)
     imgs_pillow = [read_img_pillow(os.path.join(data_dir, path)) for path in paths]
 
     benchmarks = [
         HorizontalFlip(),
-        VerticalFlip(),
-        Rotate(),
-        ShiftScaleRotate(),
-        Brightness(),
-        Contrast(),
-        BrightnessContrast(),
-        ShiftRGB(),
-        ShiftHSV(),
-        Gamma(),
-        Grayscale(),
-        RandomCrop64(),
-        PadToSize512(),
-        Resize512(),
-        RandomSizedCrop_64_512(),
-        Posterize(),
-        Solarize(),
-        Equalize(),
-        Multiply(),
-        MultiplyElementwise(),
-        ColorJitter(),
+        # VerticalFlip(),
+        # Rotate(),
+        # ShiftScaleRotate(),
+        # Brightness(),
+        # Contrast(),
+        # BrightnessContrast(),
+        # ShiftRGB(),
+        # ShiftHSV(),
+        # Gamma(),
+        # Grayscale(),
+        # RandomCrop64(),
+        # PadToSize512(),
+        # Resize512(),
+        # RandomSizedCrop_64_512(),
+        # Posterize(),
+        # Solarize(),
+        # Equalize(),
+        # Multiply(),
+        # MultiplyElementwise(),
+        # ColorJitter(),
     ]
     for library in libraries:
         imgs = imgs_pillow if library in ("torchvision", "augmentor", "pillow") else imgs_cv2
+        if library == "pixelpipes":
+            imgs = imgs_pixelpipes
         pbar = tqdm(total=len(benchmarks))
         for benchmark in benchmarks:
             pbar.set_description("Current benchmark: {} | {}".format(library, benchmark))
